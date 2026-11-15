@@ -57,3 +57,47 @@ func TestCommonRoutes(t *testing.T) {
 		t.Errorf("unknown route: %d", code)
 	}
 }
+
+func TestEval(t *testing.T) {
+	row := map[string]any{"qty": "2", "unit_price": "150.00", "name": "desk", "n": 3.0, "bad": "x"}
+	cases := []struct {
+		expr string
+		want any
+		err  string
+	}{
+		{"qty * unit_price", 300.0, ""},
+		{"1 + 2 * 3", 7.0, ""},
+		{"(1 + 2) * 3", 9.0, ""},
+		{"-n", -3.0, ""},
+		{`n >= 3 && name == "desk"`, true, ""},
+		{"!(n < 3) || false", true, ""},
+		{"qty == 2", true, ""},
+		{`name != "lamp"`, true, ""},
+		{"bad * 2", nil, `bad: "x" is not a number`},
+		{"missing + 1", nil, `unknown field "missing"`},
+		{"n / 0", nil, "division by zero"},
+	}
+	for _, c := range cases {
+		e, err := compile(c.expr)
+		if err != nil {
+			t.Errorf("compile(%q): %v", c.expr, err)
+			continue
+		}
+		got, err := eval(e, row)
+		if c.err != "" {
+			if err == nil || err.Error() != c.err {
+				t.Errorf("eval(%q) error = %v, want %q", c.expr, err, c.err)
+			}
+		} else if err != nil || got != c.want {
+			t.Errorf("eval(%q) = %v, %v, want %v", c.expr, got, err, c.want)
+		}
+	}
+}
+
+func TestCompileRejects(t *testing.T) {
+	for _, src := range []string{"qty *", "f(1)", "a[0]", "a.b", ""} {
+		if _, err := compile(src); err == nil {
+			t.Errorf("compile(%q) succeeded", src)
+		}
+	}
+}
