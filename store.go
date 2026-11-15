@@ -8,8 +8,6 @@ import (
 	"time"
 )
 
-type Pipeline struct{}
-
 type Report struct{}
 
 type Store struct {

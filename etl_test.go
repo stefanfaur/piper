@@ -181,3 +181,73 @@ func TestBuildStepsErrors(t *testing.T) {
 		}
 	}
 }
+
+const example = `{"name":"clean-sales",
+ "source":{"type":"inline","rows":[
+   {"prod":"desk","qty":"2","unit_price":"150.00"},
+   {"prod":"lamp","qty":"1","unit_price":"19.99"},
+   {"prod":"chair","qty":"x","unit_price":"75.00"}]},
+ "steps":[
+   {"op":"rename","from":"prod","to":"product"},
+   {"op":"compute","field":"total","expr":"qty * unit_price"},
+   {"op":"filter","where":"total >= 100"}],
+ "destination":"sales_clean"}`
+
+func TestPipelineRoutes(t *testing.T) {
+	h := newStore(t.TempDir()).routes()
+
+	if code, body := do(t, h, "GET", "/pipelines", ""); code != 200 || strings.TrimSpace(string(body)) != "[]" {
+		t.Errorf("empty list: %d %s", code, body)
+	}
+
+	code, body := do(t, h, "POST", "/pipelines", example)
+	created := decode[Pipeline](t, body)
+	if code != 201 || created.ID != 1 || created.Destination != (Destination{"memory", "sales_clean"}) {
+		t.Errorf("create: %d %s", code, body)
+	}
+
+	rejected := []struct {
+		name, body string
+		code       int
+		errCode    string
+		contains   string
+	}{
+		{"duplicate", example, 409, "conflict", "clean-sales"},
+		{"unknown op", `{"name":"a","source":{"type":"inline"},"steps":[{"op":"rename","from":"a","to":"b"},{"op":"pivot"}],"destination":"d"}`, 422, "unprocessable", `step 2: unknown op "pivot"`},
+		{"unknown source", `{"name":"a","source":{"type":"ftp"},"destination":"d"}`, 422, "unprocessable", "ftp"},
+		{"bad table name", `{"name":"a","source":{"type":"table","name":"a/b"},"destination":"d"}`, 422, "unprocessable", ""},
+		{"bad json", `{"name":`, 400, "validation", ""},
+		{"no name", `{"source":{"type":"inline"},"destination":"d"}`, 400, "validation", "name"},
+		{"no source", `{"name":"a","destination":"d"}`, 400, "validation", "source"},
+		{"bad destination", `{"name":"a","source":{"type":"inline"},"destination":"../etc"}`, 400, "validation", ""},
+		{"bad destination type", `{"name":"a","source":{"type":"inline"},"destination":{"type":"s3","name":"d"}}`, 400, "validation", ""},
+		{"bad schedule", `{"name":"a","source":{"type":"inline"},"destination":"d","schedule":"soon"}`, 400, "validation", ""},
+		{"short schedule", `{"name":"a","source":{"type":"inline"},"destination":"d","schedule":"10ms"}`, 400, "validation", ""},
+	}
+	for _, c := range rejected {
+		code, body := do(t, h, "POST", "/pipelines", c.body)
+		e := decode[map[string]string](t, body)
+		if code != c.code || e["error"] != c.errCode || !strings.Contains(e["message"], c.contains) {
+			t.Errorf("%s: %d %s", c.name, code, body)
+		}
+	}
+
+	code, body = do(t, h, "POST", "/pipelines", `{"name":"f","source":{"type":"inline"},"destination":{"type":"file","name":"out"}}`)
+	if code != 201 || decode[Pipeline](t, body).ID != 2 {
+		t.Errorf("file destination: %d %s", code, body)
+	}
+	if _, body = do(t, h, "GET", "/pipelines", ""); len(decode[[]Pipeline](t, body)) != 2 {
+		t.Errorf("list: %s", body)
+	}
+}
+
+func TestReadCSV(t *testing.T) {
+	s := newStore(t.TempDir())
+	rows, rejected, read, err := s.readSource(Source{Type: "csv", Data: "a,b\n1,2\n3\n4,5\n"})
+	if err != nil || read != 3 || len(rows) != 2 || rows[0].N != 1 || rows[1].N != 3 || rows[1].F["b"] != "5" {
+		t.Errorf("rows: %v read=%d err=%v", rows, read, err)
+	}
+	if len(rejected) != 1 || rejected[0].Row != 2 || rejected[0].Op != "source" {
+		t.Errorf("rejected: %+v", rejected)
+	}
+}

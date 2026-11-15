@@ -59,6 +59,8 @@ func (s *Store) routes() http.Handler {
 		fmt.Fprintf(w, "<!doctype html><title>%s</title><h1>%s</h1><p>%s</p><p>%s, group %s</p>",
 			app, app, project, author, group)
 	})
+	mux.HandleFunc("POST /pipelines", s.createPipeline)
+	mux.HandleFunc("GET /pipelines", s.listPipelines)
 	mux.HandleFunc("POST /reset", func(w http.ResponseWriter, r *http.Request) {
 		s.reset()
 		w.WriteHeader(http.StatusNoContent)
