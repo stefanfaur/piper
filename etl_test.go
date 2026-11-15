@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -249,5 +250,151 @@ func TestReadCSV(t *testing.T) {
 	}
 	if len(rejected) != 1 || rejected[0].Row != 2 || rejected[0].Op != "source" {
 		t.Errorf("rejected: %+v", rejected)
+	}
+}
+
+func define(t *testing.T, h http.Handler, body string) {
+	t.Helper()
+	if code, resp := do(t, h, "POST", "/pipelines", body); code != 201 {
+		t.Fatalf("define: %d %s", code, resp)
+	}
+}
+
+func runPipeline(t *testing.T, h http.Handler, id string) Report {
+	t.Helper()
+	code, body := do(t, h, "POST", "/pipelines/"+id+"/run", "")
+	if code != 200 {
+		t.Fatalf("run %s: %d %s", id, code, body)
+	}
+	return decode[Report](t, body)
+}
+
+func rowsOf(t *testing.T, h http.Handler, dest string) []map[string]any {
+	t.Helper()
+	code, body := do(t, h, "GET", "/data/"+dest, "")
+	if code != 200 {
+		t.Fatalf("data %s: %d %s", dest, code, body)
+	}
+	return decode[[]map[string]any](t, body)
+}
+
+func TestExampleRun(t *testing.T) {
+	h := newStore(t.TempDir()).routes()
+	define(t, h, example)
+
+	run := runPipeline(t, h, "1")
+	if run.RunID != 1 || run.Status != "completed" || run.Read != 3 || run.Written != 1 || run.Rejected != 1 {
+		t.Errorf("run: %+v", run)
+	}
+
+	_, body := do(t, h, "GET", "/runs/1", "")
+	rep := decode[Report](t, body)
+	if len(rep.Rejections) != 1 {
+		t.Fatalf("report: %s", body)
+	}
+	rej := rep.Rejections[0]
+	if rej.Row != 3 || rej.Step != 2 || rej.Op != "compute" || rej.Reason != `qty: "x" is not a number` || rej.Data["product"] != "chair" {
+		t.Errorf("rejection: %+v", rej)
+	}
+
+	rows := rowsOf(t, h, "sales_clean")
+	if len(rows) != 1 || rows[0]["product"] != "desk" || rows[0]["total"] != 300.0 {
+		t.Errorf("data: %v", rows)
+	}
+
+	if again := runPipeline(t, h, "1"); again.RunID != 2 || again.Written != 1 {
+		t.Errorf("second run: %+v", again)
+	}
+	if rows = rowsOf(t, h, "sales_clean"); len(rows) != 1 {
+		t.Errorf("data after second run: %v", rows)
+	}
+	if _, body = do(t, h, "GET", "/runs", ""); len(decode[[]Report](t, body)) != 2 {
+		t.Errorf("runs: %s", body)
+	}
+}
+
+func TestAbortLeavesDestinationUntouched(t *testing.T) {
+	h := newStore(t.TempDir()).routes()
+	define(t, h, `{"name":"a","source":{"type":"inline","rows":[{"n":1}]},"destination":"out"}`)
+	define(t, h, `{"name":"b","source":{"type":"inline","rows":[{"n":5},{"n":-1}]},
+		"steps":[{"op":"validate","rule":"n > 0","on_fail":"abort"}],"destination":"out"}`)
+	runPipeline(t, h, "1")
+
+	if run := runPipeline(t, h, "2"); run.Status != "failed" || run.Written != 0 {
+		t.Errorf("run: %+v", run)
+	}
+	_, body := do(t, h, "GET", "/runs/2", "")
+	if rep := decode[Report](t, body); !strings.Contains(rep.Error, "step 1 (validate): row 2") {
+		t.Errorf("report: %s", body)
+	}
+	if rows := rowsOf(t, h, "out"); len(rows) != 1 || rows[0]["n"] != 1.0 {
+		t.Errorf("destination changed: %v", rows)
+	}
+}
+
+func TestRejectRatio(t *testing.T) {
+	h := newStore(t.TempDir()).routes()
+	steps := `"steps":[{"op":"compute","field":"d","expr":"n * 2"}]`
+	define(t, h, `{"name":"most","source":{"type":"inline","rows":[{"n":"x"},{"n":"y"},{"n":1}]},`+steps+`,"destination":"most"}`)
+	define(t, h, `{"name":"half","source":{"type":"inline","rows":[{"n":"x"},{"n":1}]},`+steps+`,"destination":"half"}`)
+
+	if run := runPipeline(t, h, "1"); run.Status != "failed" || run.Read != 3 || run.Written != 0 || run.Rejected != 2 {
+		t.Errorf("above the limit: %+v", run)
+	}
+	if code, _ := do(t, h, "GET", "/data/most", ""); code != 404 {
+		t.Errorf("failed run created its destination: %d", code)
+	}
+	if run := runPipeline(t, h, "2"); run.Status != "completed" || run.Written != 1 {
+		t.Errorf("exactly at the limit: %+v", run)
+	}
+}
+
+func TestFileDestinationAndTableSource(t *testing.T) {
+	dir := t.TempDir()
+	h := newStore(dir).routes()
+	define(t, h, example)
+	define(t, h, `{"name":"to-file","source":{"type":"table","name":"sales_clean"},"destination":{"type":"file","name":"f"}}`)
+	define(t, h, `{"name":"ghost","source":{"type":"table","name":"ghost"},"destination":"g"}`)
+	runPipeline(t, h, "1")
+
+	if run := runPipeline(t, h, "2"); run.Status != "completed" || run.Read != 1 || run.Written != 1 {
+		t.Errorf("table to file: %+v", run)
+	}
+	if rows := rowsOf(t, h, "f"); len(rows) != 1 || rows[0]["product"] != "desk" {
+		t.Errorf("file data: %v", rows)
+	}
+	if files, _ := os.ReadDir(dir); len(files) != 1 || files[0].Name() != "f.json" {
+		t.Errorf("data dir: %v", files)
+	}
+
+	run := runPipeline(t, h, "3")
+	_, body := do(t, h, "GET", "/runs/3", "")
+	if run.Status != "failed" || !strings.Contains(decode[Report](t, body).Error, "ghost") {
+		t.Errorf("missing table: %s", body)
+	}
+
+	do(t, h, "POST", "/reset", "")
+	if code, _ := do(t, h, "GET", "/data/f", ""); code != 404 {
+		t.Errorf("file survived reset: %d", code)
+	}
+	if _, body = do(t, h, "GET", "/runs", ""); strings.TrimSpace(string(body)) != "[]" {
+		t.Errorf("runs after reset: %s", body)
+	}
+	if code, body := do(t, h, "POST", "/pipelines", example); code != 201 || decode[Pipeline](t, body).ID != 1 {
+		t.Errorf("ids after reset: %s", body)
+	}
+}
+
+func TestRunRouteErrors(t *testing.T) {
+	h := newStore(t.TempDir()).routes()
+	for path, want := range map[string]int{"/pipelines/9/run": 404, "/pipelines/abc/run": 400} {
+		if code, _ := do(t, h, "POST", path, ""); code != want {
+			t.Errorf("POST %s: %d", path, code)
+		}
+	}
+	for path, want := range map[string]int{"/runs/9": 404, "/runs/abc": 400, "/data/nope": 404} {
+		if code, _ := do(t, h, "GET", path, ""); code != want {
+			t.Errorf("GET %s: %d", path, code)
+		}
 	}
 }

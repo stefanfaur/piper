@@ -8,8 +8,6 @@ import (
 	"time"
 )
 
-type Report struct{}
-
 type Store struct {
 	mu        sync.Mutex
 	pipelines []*Pipeline

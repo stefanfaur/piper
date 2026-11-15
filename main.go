@@ -61,6 +61,10 @@ func (s *Store) routes() http.Handler {
 	})
 	mux.HandleFunc("POST /pipelines", s.createPipeline)
 	mux.HandleFunc("GET /pipelines", s.listPipelines)
+	mux.HandleFunc("POST /pipelines/{id}/run", s.runPipeline)
+	mux.HandleFunc("GET /runs", s.listRuns)
+	mux.HandleFunc("GET /runs/{id}", s.getRun)
+	mux.HandleFunc("GET /data/{destination}", s.getData)
 	mux.HandleFunc("POST /reset", func(w http.ResponseWriter, r *http.Request) {
 		s.reset()
 		w.WriteHeader(http.StatusNoContent)
