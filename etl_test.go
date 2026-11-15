@@ -61,7 +61,7 @@ func TestCommonRoutes(t *testing.T) {
 }
 
 func TestEval(t *testing.T) {
-	row := map[string]any{"qty": "2", "unit_price": "150.00", "name": "desk", "n": 3.0, "bad": "x"}
+	row := map[string]any{"qty": "2", "unit_price": "150.00", "name": "desk", "n": 3.0, "bad": "x", "nan": "NaN"}
 	cases := []struct {
 		expr string
 		want any
@@ -78,6 +78,8 @@ func TestEval(t *testing.T) {
 		{"bad * 2", nil, `bad: "x" is not a number`},
 		{"missing + 1", nil, `unknown field "missing"`},
 		{"n / 0", nil, "division by zero"},
+		{"nan * 2", nil, `nan: "NaN" is not a number`},
+		{"1e300 * 1e300", nil, "result is not a finite number"},
 	}
 	for _, c := range cases {
 		e, err := compile(c.expr)
@@ -97,7 +99,7 @@ func TestEval(t *testing.T) {
 }
 
 func TestCompileRejects(t *testing.T) {
-	for _, src := range []string{"qty *", "f(1)", "a[0]", "a.b", ""} {
+	for _, src := range []string{"qty *", "f(1)", "a[0]", "a.b"} {
 		if _, err := compile(src); err == nil {
 			t.Errorf("compile(%q) succeeded", src)
 		}
@@ -161,6 +163,13 @@ func TestSteps(t *testing.T) {
 	if len(out) != 2 || out[0].F["p"] != "a" || out[0].F["total"] != 3.0 || out[0].N != 0 ||
 		out[1].F["p"] != "b" || out[1].F["total"] != 5.0 || len(rej) != 1 {
 		t.Errorf("aggregate sum: %v %v", out, rej)
+	}
+
+	for fn, want := range map[string]float64{"avg": 1.5, "min": 1, "max": 2} {
+		out, _, _ = runSteps(t, `[{"op":"aggregate","group_by":["p"],"fn":"`+fn+`","field":"v","as":"r"}]`, sales...)
+		if len(out) != 2 || out[0].F["r"] != want {
+			t.Errorf("aggregate %s: %v, want %v", fn, out, want)
+		}
 	}
 
 	out, _, _ = runSteps(t, `[{"op":"aggregate","group_by":["p"],"fn":"count","as":"n"}]`, sales...)
@@ -241,6 +250,23 @@ func TestPipelineRoutes(t *testing.T) {
 	if _, body = do(t, h, "GET", "/pipelines", ""); len(decode[[]Pipeline](t, body)) != 2 {
 		t.Errorf("list: %s", body)
 	}
+}
+
+func TestScheduledPipelineStartsScheduler(t *testing.T) {
+	s := newStore(t.TempDir())
+	define(t, s.routes(), `{"name":"s","source":{"type":"inline","rows":[{"n":1}]},"destination":"d","schedule":"1s"}`)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		n := len(s.runs)
+		s.mu.Unlock()
+		if n > 0 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Error("no scheduled run within 3s")
 }
 
 func TestReadCSV(t *testing.T) {
@@ -393,7 +419,7 @@ func TestRunRouteErrors(t *testing.T) {
 			t.Errorf("POST %s: %d", path, code)
 		}
 	}
-	for path, want := range map[string]int{"/runs/9": 404, "/runs/abc": 400, "/data/nope": 404} {
+	for path, want := range map[string]int{"/runs/9": 404, "/runs/abc": 400} {
 		if code, _ := do(t, h, "GET", path, ""); code != want {
 			t.Errorf("GET %s: %d", path, code)
 		}

@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -117,25 +118,35 @@ func evalBinary(e *ast.BinaryExpr, f map[string]any) (any, error) {
 		return nil, err
 	}
 	switch e.Op {
-	case token.ADD:
-		return l + r, nil
-	case token.SUB:
-		return l - r, nil
-	case token.MUL:
-		return l * r, nil
-	case token.QUO:
-		if r == 0 {
-			return nil, errors.New("division by zero")
-		}
-		return l / r, nil
 	case token.LSS:
 		return l < r, nil
 	case token.LEQ:
 		return l <= r, nil
 	case token.GTR:
 		return l > r, nil
+	case token.GEQ:
+		return l >= r, nil
 	}
-	return l >= r, nil
+
+	var n float64
+	switch e.Op {
+	case token.ADD:
+		n = l + r
+	case token.SUB:
+		n = l - r
+	case token.MUL:
+		n = l * r
+	case token.QUO:
+		if r == 0 {
+			return nil, errors.New("division by zero")
+		}
+		n = l / r
+	}
+	// JSON cannot carry Inf, so an overflow must reject the row here.
+	if math.IsInf(n, 0) {
+		return nil, errors.New("result is not a finite number")
+	}
+	return n, nil
 }
 
 func evalBool(e ast.Expr, f map[string]any) (bool, error) {
@@ -172,7 +183,7 @@ func toNum(v any) (float64, bool) {
 		return v, true
 	case string:
 		n, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
-		return n, err == nil
+		return n, err == nil && !math.IsNaN(n) && !math.IsInf(n, 0)
 	}
 	return 0, false
 }
