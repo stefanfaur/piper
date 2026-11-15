@@ -200,6 +200,9 @@ func (s *Store) createPipeline(w http.ResponseWriter, r *http.Request) {
 	}
 	p.ID = len(s.pipelines) + 1
 	s.pipelines = append(s.pipelines, p)
+	if p.every > 0 {
+		s.schedule(p, p.every)
+	}
 	writeJSON(w, http.StatusCreated, p)
 }
 

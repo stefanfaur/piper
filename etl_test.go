@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func do(t *testing.T, h http.Handler, method, path, body string) (int, []byte) {
@@ -396,5 +397,31 @@ func TestRunRouteErrors(t *testing.T) {
 		if code, _ := do(t, h, "GET", path, ""); code != want {
 			t.Errorf("GET %s: %d", path, code)
 		}
+	}
+}
+
+func TestSchedule(t *testing.T) {
+	s := newStore(t.TempDir())
+	h := s.routes()
+	define(t, h, example)
+
+	s.mu.Lock()
+	s.schedule(s.pipelines[0], 10*time.Millisecond)
+	s.mu.Unlock()
+
+	var runs []Summary
+	for deadline := time.Now().Add(2 * time.Second); len(runs) < 2 && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+		_, body := do(t, h, "GET", "/runs", "")
+		runs = decode[[]Summary](t, body)
+	}
+	if len(runs) < 2 || runs[0].Trigger != "schedule" || runs[0].Status != "completed" {
+		t.Fatalf("scheduled runs: %+v", runs)
+	}
+
+	do(t, h, "POST", "/reset", "")
+	time.Sleep(50 * time.Millisecond)
+	if _, body := do(t, h, "GET", "/runs", ""); strings.TrimSpace(string(body)) != "[]" {
+		t.Errorf("scheduler survived reset: %s", body)
 	}
 }

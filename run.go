@@ -185,3 +185,26 @@ func (s *Store) getData(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, rows)
 }
+
+// schedule runs p on every tick until the store is reset. The caller holds
+// s.mu. The context is checked again under the lock so that a tick racing
+// with /reset cannot add a run to the fresh store.
+func (s *Store) schedule(p *Pipeline, every time.Duration) {
+	ctx := s.ctx
+	go func() {
+		ticker := time.NewTicker(every)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.mu.Lock()
+				if ctx.Err() == nil {
+					s.runLocked(p, "schedule")
+				}
+				s.mu.Unlock()
+			}
+		}
+	}()
+}
